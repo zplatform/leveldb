@@ -43,6 +43,8 @@
 #endif  // defined(DeleteFile)
 #endif  // defined(_WIN32)
 
+#define ZA_OPTIMIZE_SYNC_FILE (1)
+
 namespace leveldb {
 
 class FileLock;
@@ -61,6 +63,27 @@ class LEVELDB_EXPORT Env {
 
   virtual ~Env();
 
+#if ZA_OPTIMIZE_SYNC_FILE
+    /// Sometimes, however, an application needs to know for certain that its writes are committed to storage right now,
+    /// to prevent data loss or corruption in the event of a crash.
+    /// Here are a few methods that you can call to do the above.
+    /// These calls force the operating system to flush any data in its write buffer—also known as "dirty" data—to disk immediately,
+    /// no matter how inconvenient or inefficient that might be.
+    enum ZASyncFileType {
+        // fcntl F_FULLFSYNC, slowest
+        // Default type
+        ZASyncFileType_fcntl_FULLFSYNC = 0,
+        
+        // fcntl F_BARRIERFSYNC, faster than `ZASyncFileType_fcntl_FULLFSYNC`
+        ZASyncFileType_fcntl_BARRIERFSYNC = 1,
+        
+        // fsync, fastest, but it does not guarantee durability past power failures or OS crash.
+        ZASyncFileType_fsync = 10
+    };
+    
+    static Env* ZAMakePosixEnv(ZASyncFileType syncFileType);
+#endif // ZA_OPTIMIZE_SYNC_FILE
+    
   // Return a default environment suitable for the current operating
   // system.  Sophisticated users may wish to provide their own Env
   // implementation instead of relying on this default environment.

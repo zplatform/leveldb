@@ -241,9 +241,16 @@ class PosixMmapReadableFile final : public RandomAccessFile {
 
 class PosixWritableFile final : public WritableFile {
  public:
-  PosixWritableFile(std::string filename, int fd)
+  PosixWritableFile(std::string filename, int fd
+#if ZA_OPTIMIZE_SYNC_FILE
+                    , Env::ZASyncFileType syncFileType
+#endif // ZA_OPTIMIZE_SYNC_FILE
+                    )
       : pos_(0),
         fd_(fd),
+#if ZA_OPTIMIZE_SYNC_FILE
+        syncFileType_(syncFileType),
+#endif // ZA_OPTIMIZE_SYNC_FILE
         is_manifest_(IsManifest(filename)),
         filename_(std::move(filename)),
         dirname_(Dirname(filename_)) {}
@@ -312,7 +319,11 @@ class PosixWritableFile final : public WritableFile {
       return status;
     }
 
-    return SyncFd(fd_, filename_);
+    return SyncFd(fd_, filename_
+#if ZA_OPTIMIZE_SYNC_FILE
+                  , syncFileType_
+#endif // ZA_OPTIMIZE_SYNC_FILE
+                  );
   }
 
  private:
@@ -347,7 +358,11 @@ class PosixWritableFile final : public WritableFile {
     if (fd < 0) {
       status = PosixError(dirname_, errno);
     } else {
-      status = SyncFd(fd, dirname_);
+      status = SyncFd(fd, dirname_
+#if ZA_OPTIMIZE_SYNC_FILE
+                      , syncFileType_
+#endif // ZA_OPTIMIZE_SYNC_FILE
+                      );
       ::close(fd);
     }
     return status;
@@ -359,15 +374,31 @@ class PosixWritableFile final : public WritableFile {
   //
   // The path argument is only used to populate the description string in the
   // returned Status if an error occurs.
-  static Status SyncFd(int fd, const std::string& fd_path) {
+  static Status SyncFd(int fd, const std::string& fd_path
+#if ZA_OPTIMIZE_SYNC_FILE
+                       , Env::ZASyncFileType syncFileType
+#endif // ZA_OPTIMIZE_SYNC_FILE
+                       ) {
 #if HAVE_FULLFSYNC
     // On macOS and iOS, fsync() doesn't guarantee durability past power
     // failures. fcntl(F_FULLFSYNC) is required for that purpose. Some
     // filesystems don't support fcntl(F_FULLFSYNC), and require a fallback to
     // fsync().
-    if (::fcntl(fd, F_FULLFSYNC) == 0) {
-      return Status::OK();
-    }
+#if ZA_OPTIMIZE_SYNC_FILE
+      if (syncFileType == Env::ZASyncFileType_fcntl_FULLFSYNC) {
+          if (::fcntl(fd, F_FULLFSYNC) == 0) {
+              return Status::OK();
+          }
+      } else if (syncFileType == Env::ZASyncFileType_fcntl_BARRIERFSYNC) {
+          if (::fcntl(fd, F_BARRIERFSYNC) == 0) {
+              return Status::OK();
+          }
+      }
+#else // ZA_OPTIMIZE_SYNC_FILE
+      if (::fcntl(fd, F_FULLFSYNC) == 0) {
+          return Status::OK();
+      }
+#endif // !ZA_OPTIMIZE_SYNC_FILE
 #endif  // HAVE_FULLFSYNC
 
 #if HAVE_FDATASYNC
@@ -423,7 +454,10 @@ class PosixWritableFile final : public WritableFile {
   char buf_[kWritableFileBufferSize];
   size_t pos_;
   int fd_;
-
+#if ZA_OPTIMIZE_SYNC_FILE
+  Env::ZASyncFileType syncFileType_;
+#endif // ZA_OPTIMIZE_SYNC_FILE
+    
   const bool is_manifest_;  // True if the file's name starts with MANIFEST.
   const std::string filename_;
   const std::string dirname_;  // The directory of filename_.
@@ -542,7 +576,11 @@ class PosixEnv : public Env {
       return PosixError(filename, errno);
     }
 
-    *result = new PosixWritableFile(filename, fd);
+    *result = new PosixWritableFile(filename, fd
+#if ZA_OPTIMIZE_SYNC_FILE
+                                    , syncFileType_
+#endif // ZA_OPTIMIZE_SYNC_FILE
+                                    );
     return Status::OK();
   }
 
@@ -554,7 +592,11 @@ class PosixEnv : public Env {
       return PosixError(filename, errno);
     }
 
-    *result = new PosixWritableFile(filename, fd);
+    *result = new PosixWritableFile(filename, fd
+#if ZA_OPTIMIZE_SYNC_FILE
+                                    , syncFileType_
+#endif // ZA_OPTIMIZE_SYNC_FILE
+                                    );
     return Status::OK();
   }
 
@@ -724,6 +766,11 @@ class PosixEnv : public Env {
   PosixLockTable locks_;  // Thread-safe.
   Limiter mmap_limiter_;  // Thread-safe.
   Limiter fd_limiter_;    // Thread-safe.
+    
+public:
+#if ZA_OPTIMIZE_SYNC_FILE
+    ZASyncFileType syncFileType_; // Default to ZASyncFileType_fcntl_FULLFSYNC
+#endif // ZA_OPTIMIZE_SYNC_FILE
 };
 
 // Return the maximum number of concurrent mmaps.
@@ -753,6 +800,9 @@ PosixEnv::PosixEnv()
     : background_work_cv_(&background_work_mutex_),
       started_background_thread_(false),
       mmap_limiter_(MaxMmaps()),
+#if ZA_OPTIMIZE_SYNC_FILE
+      syncFileType_(ZASyncFileType_fcntl_FULLFSYNC),
+#endif // ZA_OPTIMIZE_SYNC_FILE
       fd_limiter_(MaxOpenFiles()) {}
 
 void PosixEnv::Schedule(
@@ -872,5 +922,13 @@ Env* Env::Default() {
   static PosixDefaultEnv env_container;
   return env_container.env();
 }
+
+#if ZA_OPTIMIZE_SYNC_FILE
+Env* Env::ZAMakePosixEnv(ZASyncFileType syncFileType) {
+  PosixEnv *posix = new PosixEnv();
+  posix->syncFileType_ = syncFileType;
+  return posix;
+}
+#endif // ZA_OPTIMIZE_SYNC_FILE
 
 }  // namespace leveldb
